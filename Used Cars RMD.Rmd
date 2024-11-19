@@ -1,0 +1,658 @@
+---
+title: "Used cars price prediction"
+author: "Lauren Gallego Ropero"
+date: "2024-09-17"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The data set is a collection of valuable data about used cars that have been advertised on an online platform to be sold, and it includes the following information:
+
+-   The date the add was first seen by a crawler
+
+-   The name of the car
+
+-   Seller type: Private/Company
+
+-   Offer type: Offer/Request
+
+-   The car price
+
+-   A/B testing information: Control/Test
+
+-   Vehicle type
+
+-   Year of registration
+
+-   Gearbox: Manual/Automatic
+
+-   Horse Power
+
+-   Model
+
+-   Kilometers driven so far
+
+-   Month of registration
+
+-   Fuel type: Gasoline/Diesel
+
+-   Brand
+
+-   If there is any non-repaired damage in the vehicle
+
+-   Advertisement creation date
+
+-   Number of pictures included in the advertisement
+
+-   The date the add was last seen by a crawler
+
+Import the data and take a quick glance at the variable characteristics from the summary.
+
+```{r}
+autos <- read.csv('cars.csv',header = T, dec = '.', sep = ',')
+summary(autos)
+```
+
+```{r warning=FALSE, include=FALSE}
+library(forcats)
+library(mice)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(grid)
+library(MASS)
+library(car)
+library(class)
+library(caret)
+library(gbm)
+library(randomForest)
+library(recipes)
+```
+
+# Data Pre-processing
+
+Categorical values must be transformed into factors
+
+```{r}
+autos$abtest <- as.factor(autos$abtest)
+autos$vehicleType <- as.factor(autos$vehicleType)
+autos$gearbox <- as.factor(autos$gearbox)
+autos$fuelType <- as.factor(autos$fuelType)
+autos$Damage <- as.factor(autos$Damage)
+autos$seller <- as.factor(autos$seller)
+autos$offerType <- as.factor(autos$offerType)
+```
+
+There are some columns that are unnecessary and can be omitted:
+
+-   Too many categories to handle
+
+```{r}
+length(unique(autos$model))
+length(unique(autos$brand))
+```
+
+-   Same values for all observations
+
+```{r}
+summary(autos$nrOfPictures)
+summary(autos$seller)
+summary(autos$offerType)
+```
+
+Delete columns
+
+```{r}
+del_cols <- c('index','name','model','brand','nrOfPictures','postalCode','seller','offerType')
+autos <- autos [,!names(autos) %in% del_cols]
+
+```
+
+## Missing Values
+
+```{r warning=FALSE}
+na_counts <- colSums(is.na(autos))
+na_counts <- data.frame(Column = names(na_counts), 
+                        NA_Counts = na_counts,
+                        NA_prop = na_counts / dim(autos)[1])
+has_na <- which(na_counts$NA_Counts != 0)
+na_counts[has_na,]
+```
+
+Since the null value proportion of the columns gearbox and fuelType are very low, it is safe to remove those rows, which represent less than 5% of the data
+
+```{r echo = TRUE, include=FALSE}
+autos <- autos[-which(is.na(autos$gearbox) | is.na(autos$fuelType)),]
+```
+
+Finally, for the null values in the damage column, I are going to use an imputation method, since 12% is a more significant proportion. For this, I will use the MICE algorithm, and, since are only working with a binary column, the appropriate model is logistic regression.
+
+```{r echo = TRUE, include=FALSE}
+set.seed(123)
+input <- mice(autos, method = 'logreg', m = 1, maxit = 10, seed = 123)
+autos <- complete(input)
+```
+
+## Feature Engineering
+
+There are 3 variables in the clean data than I cannot use given their date format. However, with some transformations, I can make use of the information that they include within their relationships.
+
+If a car advertisement has been posted for a long time, this might have resulted in a potential price decrease, given the lack of demand. In order to obtain how long an add has been posted, I can calculate the time difference between the variables dateCrawled and lastSeen.
+
+```{r}
+autos$posted <- difftime(autos$lastSeen ,autos$dateCrawled,
+                                   units = 'days')
+autos$posted <- round(as.numeric(autos$posted), 2)
+
+autos <- autos[,-c(1,12,13)]
+```
+
+After a quick overview at the variable kilometer, I realized that it seems to be distributed into numeric categories rather than continuously. Let's take a deeper look at it, how many categories are there?
+
+```{r}
+length(unique(autos$kilometer))
+```
+
+Now, transform it into a factor to visually analyze these categories and their distribution
+
+```{r echo=FALSE}
+ggplot(autos, aes(x = as.factor(kilometer))) +
+  geom_bar(fill = "skyblue", color = "black", width = 0.7) +
+  labs(title = "Distribution of Kilometers",
+       x = "Kilometer",
+       y = "Count") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+In the plot above, see how the number of used cars and the kilometers have a positive correlation. In addition, notice the extraordinary proportion of cars marked as 150 000 kilometers. Given this bizarre distribution, assume that this category belongs to those cars with at least 150 thousand kilometers.
+
+Ideally, I would have the exact number of kilometers for every observation, treating it as a continuous variable, however, this is not the case. Therefore, the approach that I will follow will be to convert it into a factor, where every of the categories above will have their own numeric index following an ascending order. This will leave us with a total of 12 categories.
+
+```{r}
+autos$kilometer <- as.factor(autos$kilometer)
+autos$kilometer <- as.integer(autos$kilometer)
+```
+
+Another interesting variable is the year of registration. For a better understanding, this variable will be transformed into the car's age. This can be done since all the dates in the data correspond to the year 2016.
+
+Note that I could express the car age in months, however, the price of used cars does not generally suffer short term changes to a degree where I would be losing insights by expressing age in years. Therefore, and for a better interpretability, I will discard the use of months.
+
+```{r}
+autos$years <- 2016 - autos $yearOfRegistration 
+autos$years <- as.integer(autos$years)
+
+autos$monthOfRegistration <- NULL
+autos$yearOfRegistration <- NULL
+```
+
+It is also important to analyze the distribution of the dependent variable. In order to do so, I will visualize it:
+
+```{r echo=FALSE}
+plot1 <-ggplot(data = autos, aes(x = price)) +
+  geom_density(fill = "skyblue", color = "darkblue", alpha = 0.7) +  
+  geom_rug(sides = "b", color = "darkblue") +  
+  labs(title = 'General Price Distribution',
+       x = 'Price',
+       y = 'Density') +  
+  theme_minimal() +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),  
+    axis.title.x = element_text(size = 14, face = "bold"),  
+    axis.title.y = element_text(size = 14, face = "bold"),  
+    axis.text = element_text(size = 12),  
+    panel.grid.major = element_line(linewidth = 0.5, linetype = 'dotted', color = 'grey'),  
+    panel.grid.minor = element_line(linewidth = 0.25, linetype = 'dotted', color = 'grey')  
+  ) +
+  scale_x_continuous(labels = scales::dollar_format(prefix = "",suffix = "€"))  
+
+comment1 <- textGrob(
+'The dataset covers a large range of prices, however, the plot shows how cars over
+25,000€ represent a minuscule proportion of the data. A great way to deal with this
+type of distribution is to apply a logarithmic transformation',
+                      gp = gpar(fontsize = 10),
+                      hjust = 0.5,
+                      vjust = 0.5)
+grid.arrange(plot1, comment1, ncol = 1, heights = c(4, 1))
+
+
+```
+
+```{r}
+autos$log_price <- round(log(autos$price),2)
+```
+
+Let's take a look at the distribution of the new variable:
+
+```{r echo=FALSE}
+plot2 <-ggplot(data = autos, aes(x = log_price)) +
+  geom_density(fill = "skyblue", color = "darkblue", alpha = 0.7) +  
+  geom_rug(sides = "b", color = "darkblue") +  
+  labs(title = 'Log Price Distribution',
+       x = 'Log Price',
+       y = 'Density') +  
+  theme_minimal() +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),  
+    axis.title.x = element_text(size = 14, face = "bold"),  
+    axis.title.y = element_text(size = 14, face = "bold"),  
+    axis.text = element_text(size = 12),  
+    panel.grid.major = element_line(linewidth = 0.5, linetype = 'dotted', color = 'grey'),  
+    panel.grid.minor = element_line(linewidth = 0.25, linetype = 'dotted', color = 'grey')  
+  ) +
+  scale_x_continuous(labels = scales::dollar_format(prefix = "",suffix = "€"))  
+
+comment2 <- textGrob(
+'The log transformation has skewed the previous distribution, stabilizing variance
+and shrinking the range of values. This has resulted in a much more normally
+distributed variable, which will make a more effective analysis. It is essential to
+consider that this transformation may imply the loss of some interpretability, and
+will require an inverse transformation for the predictions.',
+                      gp = gpar(fontsize = 9),
+                      hjust = 0.5,
+                      vjust = 0.5)
+grid.arrange(plot2, comment2, ncol = 1, heights = c(4, 1))
+```
+
+## Outlier Removal
+
+The model will focus on predicting the price of ordinary used cars, since the price of special cars can depend on other factors such as location, availability, transport, modifications or maintenance, none of which are considered in the data.
+
+Because of this, I must find those observations that are significantly different from the others, specially when it comes to price.
+
+Here are some plots that can help us understand the price distribution of used cars depending on different variables.\
+
+```{r echo=FALSE, warning=FALSE}
+plot3 <- ggplot(data = autos, aes(x = vehicleType, y = log_price, color = vehicleType)) +
+  geom_boxplot(alpha = 0.6) +  
+  labs(title = 'Log Price Distribution by Vehicle Type',
+       x = 'Vehicle Type',
+       y = 'Log Price') +  
+  theme_minimal() +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),
+    axis.title.x = element_text(size = 14, face = "bold"),  
+    axis.title.y = element_text(size = 14, face = "bold"),  
+    axis.text = element_text(size = 12),  
+    legend.position = "none",
+    panel.grid.major = element_line(size = 0.5, linetype = 'dotted', color = 'grey'), 
+    panel.grid.minor = element_line(size = 0.25, linetype = 'dotted', color = 'grey') 
+  ) 
+comment3 <- textGrob(
+'The plot shows how different vehicle types show various distributions, where SUVs
+tend to be the most expensive and Compact cars the least.
+By making use of boxplots, I can easily spot outliers. This is done using the IQR
+method, which I will now consider to remove such observations.',
+                      gp = gpar(fontsize = 10),
+                      hjust = 0.5,
+                      vjust = 0.5)
+
+grid.arrange(plot3, comment3, ncol = 1, heights = c(4, 1))
+
+plot4 <- ggplot(data = autos, aes(x = powerPS, y = log_price)) +
+  geom_point(color = "darkblue", alpha = 0.6) +
+  geom_smooth(method = 'lm',formula = y ~ log(x), se = TRUE, color = "red", alpha = 0.3) +
+  labs(
+    title = "Relationship Between Power and Log Price",
+    subtitle = "Analysis using y ~ log(x)",
+    x = "Power",
+    y = "Log Price",
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    legend.position = "none"
+  )
+comment4 <- textGrob(
+'The plot shows how cars with 0-200 HP can have very different prices, this is due to the influence
+of other variables such as damage, kilometers or age. Meanwhile cars with 200-400 HP suffer a rather linear
+minimum log price increase, since they tend to be more valuable despite other inconveniences. 
+Finally, notice that, because of the log transformation, the log price is upper bounded at around 12 for any HP range.',
+                      gp = gpar(fontsize = 8),
+                      hjust = 0.5,
+                      vjust = 0.5)
+
+grid.arrange(plot4, comment4, ncol = 1, heights = c(4, 1))
+```
+
+Now, I will remove the outliers using a vehicle type division.
+
+```{r}
+outlier_indices <- integer(0) 
+
+for (type in levels(autos$vehicleType)) {
+  rows <- which(autos$vehicleType == type)
+  IQR_value <- IQR(autos$log_price[rows])
+  upr <- quantile(autos$log_price[rows], 0.75) + IQR_value * 1.5
+  lwr <- quantile(autos$log_price[rows], 0.25) - IQR_value * 1.5
+  outliers <- which(autos$vehicleType == type & 
+                      (autos$log_price <= lwr | autos$log_price >= upr))
+  outlier_indices <- c(outlier_indices, outliers)
+}
+autos <- autos[-outlier_indices,]  
+
+```
+
+## Visualization
+
+Before beginning the model building process, let's visualize a few more variables so that I can get more insights about their categories and how their semantic meaning is shown by the data.
+
+```{r echo=FALSE}
+plot5 <- ggplot(data = autos, aes(x = Damage, y = log_price, color = Damage)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Log Price Distribution by Damage Status",
+    x = "Damage Status",
+    y = "Log Price",
+    color = "Damage"
+  ) + 
+  theme_minimal() + 
+  scale_color_brewer(palette = "Set2") + 
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    legend.position = "none",
+    panel.grid.major = element_line(color = "grey80"),
+    panel.grid.minor = element_blank()
+  )
+
+comment5 <- textGrob(
+' While both categories cover observations along the entire price range, I can
+clearly notice that damaged cars tend to have a lower price by looking at both
+medians. This perfectly aligns to the semantic meaning of both categories',
+                      gp = gpar(fontsize = 8),
+                      hjust = 0.5,
+                      vjust = 0.5)
+
+grid.arrange(plot5, comment5, ncol = 1, heights = c(4, 1))
+
+plot6 <- ggplot(data = autos, aes(x = log_price)) +
+  geom_density(fill = "skyblue", color = "darkblue", alpha = 0.7) +  
+  labs(title = 'Log Price Distribution by Kilometers',
+       x = 'Log Price',
+       y = 'Density') +  
+  facet_wrap(as.factor(kilometer)~.)+
+  theme_minimal() +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),  
+    axis.title.x = element_text(size = 14, face = "bold"),  
+    axis.title.y = element_text(size = 14, face = "bold"),  
+    axis.text = element_text(size = 12),  
+    panel.grid.major = element_line(linewidth = 0.5, linetype = 'dotted', color = 'grey'),  
+    panel.grid.minor = element_line(linewidth = 0.25, linetype = 'dotted', color = 'grey')  
+  ) 
+
+comment6 <- textGrob(
+' Kilometer classes 1-7 follow very similar distributions, where most of the values
+are located at log_price 8-10 and the peak is close to 9. However, as the
+kilometers increase(classes 8-12), the distribution becomes much smoother, with most
+values within the 6-10 log_price range, and a shorter peak much closer to 8.',
+                      gp = gpar(fontsize = 8),
+                      hjust = 0.5,
+                      vjust = 0.5)
+
+grid.arrange(plot6, comment6, ncol = 1, heights = c(4, 1))
+
+```
+
+# Model Building
+
+After thoroughly analyzing and cleaning the data, it is now time to create themodel. In order to find the best model, different algorithms will be tested and compared.
+
+## Statistical Models
+
+### Stepwise Regression
+
+Firstly, I will make use of a comparison between a null model and a model using all of the numeric predictors. Using stepwise regression will allow us to understand the influence of these predictors and show us a statistical analysis of the best model.
+
+```{r}
+full <- lm(log_price ~ powerPS + kilometer + posted + Damage + years, autos)
+null <- lm(log_price ~ 1, autos)
+stepwise_model <- stepAIC(null, 
+                          scope = list(lower = null, upper = full),
+                          direction = "both",trace = F)
+summary(stepwise_model)
+```
+
+Let's check the multicollinearity of the model, as well as the AIC for some evaluation.
+
+```{r}
+vif(stepwise_model)
+AIC(stepwise_model)
+```
+
+By looking at the summary of the final model, I quickly notice that, despite the low p-value of all of the numeric predictors, the relatively low R-squared value shows that there is still a significant proportion of the data variability that cannot be represented by a linear relationship.
+
+In addition, the low VIF discards multicollinearity, and the large AIC confirms that, as I expected, a linear model is not suitable.
+
+## ML Models
+
+Firstly, I have separated my data into training and test sets, and I have also defined the train control procedure. In this case, I will be using Cross Validation with 5 folds.
+
+Below, I have included the training process code for both of the algorithms I used: K-Nearest Neighbors and Random Forest.
+
+Due to limited computational resources, I have trained the models in a different environment, and then imported the hyper-parameter grids with the results back into this report.
+
+```{r}
+set.seed(42)
+
+# Delete the price variable, since I will work with the log price
+data <- autos[,-1]
+
+# Training/test sets
+indexes <- sample(1:nrow(data), size = round(0.8 * nrow(data)), replace = F)
+train_data = data[indexes,]
+test_data = data[-indexes,]
+
+train_control_knn <- trainControl(method = "cv", 
+                               number = 5,                # 5-fold cross-validation
+                               savePredictions = "final", # Save predictions for later analysis
+                               verboseIter = TRUE)        # Print progress of training
+
+train_control_rf <- trainControl(method = "cv", number = 5, verboseIter = TRUE)
+```
+
+### K-Nearest Neighbors
+
+```{r echo = TRUE, include=FALSE, eval=FALSE}
+tune_grid <- expand.grid(
+  kmax = 1:10,                 
+  distance = c(2, 1.5),                     # Euclidean distance and weighted distance
+  kernel = c("rectangular", "triangular")    
+)
+```
+
+```{r echo = TRUE, include=FALSE, eval = FALSE}
+set.seed(123)
+knn_model <- train(
+  log_price ~ ., 
+  data = train_data, 
+  method = "kknn", 
+  trControl = train_control_knn, 
+  tuneGrid = tune_grid,               
+  metric = "MAE",                     # MAE as the evaluation metric
+  preProcess = c("center", "scale"),  
+  verbose = TRUE                      
+)
+
+```
+
+Import the results.
+
+```{r}
+knn_results = read.csv("knn_results.csv", header = T, dec = ".", sep = ",")
+```
+
+Plot test accuracy (MAE) vs k.
+
+```{r echo=FALSE, warning=FALSE}
+ggplot(knn_results, aes(x = kmax, y = MAE)) +
+  geom_line(aes(color = kernel), size = 1) +
+  geom_point(aes(color = kernel, shape = factor(distance, labels = c("Weighted", "Euclidean"))), size = 3) +
+  labs(
+    title = "MAE for Different k Values in k-NN (Cross-Validation)",
+    x = "Number of Neighbors (k)",
+    y = "Mean Absolute Error (MAE)",
+    color = "Kernel Type",
+    shape = "Distance Metric"
+  ) +
+  scale_color_brewer(palette = "Set2") + 
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"), 
+    legend.position = "top",                              
+    legend.box = "horizontal",                            
+    legend.title = element_text(face = "bold")            
+  ) +
+  guides(color = guide_legend(order = 1), shape = guide_legend(order = 2))
+
+```
+
+By looking at the plot, it is clear that using a rectangular kernel leads to better results. Regarding the distance metric, there are no significant differences between weighted and euclidean distances. Therefore, whichever can be chosen. Using the elbow method, the optimal number of neighbors would be 4, although, with some extra computational flexibility, one could choose 5 in order to claim a 0.35 MAE upper bound.
+
+The best model uses the following parameters:
+
+-   k = 4
+
+-   kernel = Rectangular
+
+-   distance = Euclidean
+
+Let's take a look at this model's results to then compare them to the next algorithm, this will tell us which will be the final model.
+
+```{r}
+best_index <- which(knn_results$kmax == 4 & knn_results$distance == 2.0 
+                   & knn_results$kernel == "rectangular")
+print(knn_results[best_index,4:9])
+```
+
+The Rsquared of the model confirms its significance with respect to the data, and since the optimal k has been chosen, the MAE is balanced with the computational cost.
+
+### Random Forest
+
+```{r}
+# I will use the following hyperparameter combination
+grid_rf <- expand.grid(
+  mtry = c(4, 5, 6),                   
+  ntree = c(100, 300, 500),          
+  nodesize = c(10, 15, 20)             
+)
+
+# Add the MAE to the grid
+set.seed(42)
+grid_rf$MAE <- rep(0, nrow(grid_rf))
+MAE_CV <- rep(0,5)
+```
+
+Training process
+
+```{r echo = TRUE, include=FALSE, eval = FALSE}
+for (i in 1:27) {
+  print(i)
+  for (fold in 1:5){
+    print(paste("Fold", fold))  
+    trainIndex_rf <- sample(1:nrow(data), size = round(0.8 * nrow(data)),
+                         replace = FALSE)
+    train_rf <- data[trainIndex_rf, ]
+    test_rf <- data[-trainIndex_rf, ]
+    
+    model <- randomForest(log_price ~. , data = train_rf, 
+                          ntree = grid_rf$ntree[i],
+                          mtry = grid_rf$mtry[i],
+                          nodesize = grid_rf$nodesize[i])
+    print(paste("Model", fold))  
+    preds <- predict(model, test_rf)
+    MAE_CV[fold] <- mean(abs((preds - test_rf$log_price)))
+  }
+  grid_rf$MAE[i] <- mean(MAE_CV)
+}
+
+```
+
+Import results to environment
+
+```{r}
+grid_rf <- read.csv("rf_results.csv", header = T, sep = ",", dec = ".")
+```
+
+Select the best model and train it
+
+```{r}
+best_index <- which.min(grid_rf$MAE)
+```
+
+```{r echo = TRUE, include=FALSE, eval = FALSE}
+best_model <- randomForest(log_price ~. , data = train_data, 
+                          ntree = grid_rf$ntree[best_index],
+                          mtry = grid_rf$mtry[best_index],
+                          nodesize = grid_rf$nodesize[best_index])
+
+```
+
+Import the best model object, which has been trained at a more powerful environment.
+
+```{r}
+load("best_model.RData")
+```
+
+What is the best model's MAE?
+
+```{r}
+grid_rf$MAE[best_index]
+```
+
+As expected, Random Forest performed much better than KNN for this task, with a better adaptation to the different variable types. Now, it is time to check the variable importance to get some essential insights.
+
+```{r}
+var_import <- best_model$importance
+var_import_df <- data.frame(Variable = rownames(var_import), Importance = var_import[, 1])  
+
+```
+
+```{r echo=FALSE}
+ggplot(var_import_df, aes(x = reorder(Variable, Importance), y = Importance)) + 
+  geom_bar(stat = "identity", fill = "skyblue", color = "darkblue", width = 0.7) + 
+  geom_text(aes(label = round(Importance, 2)), vjust = -0.5, size = 3.5, color = "darkblue") +  
+  coord_flip() +  
+  labs(title = "Variable Importance (Best Model)", 
+       x = "Variables", 
+       y = "Importance") + 
+  theme_minimal(base_size = 14) +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),  
+        axis.text.y = element_text(size = 12),  
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),  
+        axis.title = element_text(face = "bold"))  
+```
+
+Similarly to what I had estimated in previous plot analysis, the age of the car has the most significant impact in its pricing. Next is the horsepower followed by the vehicle type and kilometer category.
+
+These are not surprising results, since the aforementioned variables are undoubtedly the first that come to mind when one thinks about buying or selling a used car.
+
+Now, the last thing to do is to save the model, which can be used to predict the price of future used cars.
+
+```{r eval=FALSE, echo = TRUE}
+save(best_model, file = "best_model.RData")
+```
+
+Once the model is saved, it is ready to be used, however, remember to transform the predicted log price back into the normal price scale, simply by using the exponent operation.
+
+# Conclusion
+
+This model can later be used in potential applications such as a web API to simulate a used cars portal price estimation system. The price estimation will be used to determine whether going through further physical inspections of the car are worth the cost. This would save car selling companies time and money while also reducing the web portal user traffic.
