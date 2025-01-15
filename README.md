@@ -62,3 +62,12 @@ This predictive model can be integrated into car-selling platforms to streamline
 #### 📬 Contact
 
 For inquiries, please reach out!
+<div style="text-align: center;">
+  <a href="mailto:lauren.gallegoropero@gmail.com" style="display: inline-block; margin-right: 30px;">
+    <img src="https://external-content.duckduckgo.com/iu/?u=https%3A%2F%2Ftse2.mm.bing.net%2Fth%3Fid%3DOIP.GPb0ZcxnKxbRAXHa3xNw3QHaHa%26pid%3DApi&f=1&ipt=4371e1e26750a70ea8a1e846e34d3c3685b4199092807f925c8fd83820b0224c&ipo=images" alt="Email" width="30">
+  </a>
+  <a href="https://www.linkedin.com/in/lauren-gallego-ropero/" target="_blank" style="display: inline-block;">
+    <img src="https://external-content.duckduckgo.com/iu/?u=https%3A%2F%2Ffreelogopng.com%2Fimages%2Fall_img%2F1656996524linkedin-app-icon.png&f=1&nofb=1&ipt=7c10c25f586f2064f67e02e144040429a2b1c65c2aae6c39e1fa8076f98060fc&ipo=images" width="30" alt="LinkedIn Profile">
+  </a>
+</div>
+
